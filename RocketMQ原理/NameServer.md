@@ -1,0 +1,65 @@
+
+如果大家之前都对Kafka和RabbitMQ自行查阅资料有了一个基本的了解之后，就会发现Kafka的路由中心实际上是一个非常复杂、混乱的存在。他是由ZooKeeper以及某个作为Controller的Broker共同完成的。
+
+RabbitMQ的话自己本身就是由集群每个节点同时扮演了路由中心的角色。
+
+而RocketMQ是把路由中心抽离出来作为一个独立的NameServer角色运行的，因此可以说在路由中心这块，他的架构设计是最清晰明了的。
+
+# NameServer集群化部署
+NameServer，首先是支持部署多台机器的。也就是说，NameServer是可以集群化部署的.
+
+集群化部署的目的：高可用性。
+
+# Brocker注册到NameServer
+有的人可能会猜测，是不是这样，比如一共有10台Broker机器，2个NameServer机器，然后其中5台Broker会把自己的信息注册到1个NameServer上去，另外5台Broker会把自己的信息注册到另外1个NameServer上去。
+
+答案：错
+
+这样搞有一个最大的问题，如果1台NameServer上有5个Broker的信息，另外1个NameServer上有另外5个Broker的信息，那么此时任何一个NameServer宕机了，不就导致5个Broker的信息就没了吗？
+
+brocker如何注册的？每个Broker启动都得向所有的NameServer进行注册
+
+# 系统如何从NameServer获取Broker信息？
+
+两种办法：
+第一种办法是这样，NameServer那儿会主动发送请求给所有的系统，告诉他们Broker信息。
+这种办法靠谱吗？明显不靠谱，因为NameServer怎么知道要推送Broker信息给哪些系统？未卜先知吗？
+
+第二种办法是这样的，每个系统自己每隔一段时间，定时发送请求到NameServer去拉取最新的集群Broker信息。
+这个办法是靠谱的，没有什么明显的缺陷，所以RocketMQ中的生产者和消费者就是这样，自己主动去NameServer拉取Broker信息的
+
+# Broker挂了NameServer怎么感知到
+
+要解决这个问题，靠的是Broker跟NameServer之间的心跳机制，Broker会每隔30s给所有的NameServer发送心跳，告诉每个NameServer自己目前还活着。
+
+每次NameServer收到一个Broker的心跳，就可以更新一下他的最近一次心跳的时间
+
+然后NameServer会每隔10s运行一个任务，去检查一下各个Broker的最近一次心跳时间，如果某个Broker超过120s都没发送心跳了，那么就认为这个Broker已经挂掉了。
+
+# Broker挂了客户端怎么感知到
+
+下一个问题，如果Broker挂掉了，那么作为生产者和消费者的系统是怎么感知到的呢？难道必须得NameServer发送请求给所有的系统通知他们吗？
+
+这个是不现实的，之前已经说过了，NameServer去发送这个东西非常的不靠谱。
+
+但是如果NameServer没有及时通知给那些系统，那么有没有可能出现这样一种情况，刚开始集群里有10个Broker，各个系统从NameServer那里得知，都以为有10个Broker。
+
+结果此时突然挂了一个Broker，120s没发心跳给NameServer，NameServer是知道现在只有9个Broker了。
+
+但是此时其他系统是不知道只有9个Broker的，还以为有10个Broker，此时可能某个系统就会发送消息到那个已经挂掉的Broker上去，此时是绝对不可能成功发送消息的
+
+大家可以想一下，如果确实是那个情况，可以有两种解决办法。
+
+首先，你可以考虑不发送消息到那台Broker，改成发到其他Broker上去。
+
+其次，假设你必须要发送消息给那台Broker，那么他挂了，他的Slave机器是一个备份，可以继续使用，你是不是可以考虑等一会儿去跟他的Slave进行通信？
+
+总之，这些都是思路，但是现在我们先知道，对于生产者而言，他是有一套容错机制的，即使一下子没感知到某个Broker挂了，他可以有别的方案去应对。
+
+# Broker跟NameServer之间的通信是基于什么协议
+
+HTTP协议？RPC调用？还是TCP长连接？首先
+
+在RocketMQ的实现中，采用的是TCP长连接进行通信。
+
+也就是说，Broker会跟每个NameServer都建立一个TCP长连接，然后定时通过TCP长连接发送心跳请求过去

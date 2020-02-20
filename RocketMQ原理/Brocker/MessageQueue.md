@@ -1,0 +1,53 @@
+# MessageQueue
+
+在创建Topic的时候需要指定一个很关键的参数，就是MessageQueue
+
+所以在这里RocketMQ引入了MessageQueue的概念，本质上就是一个数据分片的机制。
+
+在这个机制中，假设你的Topic有1万条数据，然后你的Topic有4个MessageQueue，那么大致可以认为会在每个MessageQueue中放入2500条数据
+
+所以其实MessageQueue就是RocketMQ中非常关键的一个数据分片机制，他通过MessageQueue将一个Topic的数据拆分为了很多个数据分片，然后在每个Broker机器上都存储一些MessageQueue。
+
+通过这个方法，就可以实现Topic数据的分布式存储！
+
+# 生产者发送消息的时候写入哪个MessageQueue
+
+要解决这个问题，大家首先就要记得之前我们讲解过的一个重要的点，生产者会跟NameServer进行通信获取Topic的路由数据。
+
+所以生产者从NameServer中就会知道，一个Topic有几个MessageQueue，哪些MessageQueue在哪台Broker机器上，哪些MesssageQueue在另外一台Broker机器上，这些都会知道
+
+然后呢，现在我们暂时先认为生产者会均匀的把消息写入各个MessageQueue，就是比如这个生产者发送出去了20条数据，那么4个MessageQueue就是每个都会写入5条数据。
+
+# 如果某个Broker出现故障该怎么办
+
+接下来我们分析一下，如果某个Broker临时出现故障了，比如Master Broker挂了，此时正在等待的其他Slave Broker自动热切换为Master Broker，那么这个时候对这一组Broker就没有Master Broker可以写入了
+
+如果你还是按照之前的策略来均匀把数据写入各个Broker上的MessageQueue，那么会导致你在一段时间内，每次访问到这个挂掉的Master Broker都会访问失败，这个似乎不是我们想要的样子。
+
+对于这个问题，通常来说建议大家在Producer中开启一个开关，就是sendLatencyFaultEnable
+
+一旦打开了这个开关，那么他会有一个自动容错机制，比如如果某次访问一个Broker发现网络延迟有500ms，然后还无法访问，那么就会自动回避访问这个Broker一段时间，比如接下来3000ms内，就不会访问这个Broker了。
+
+# 一个很关键的问题：ConsumeQueue文件也是基于os cache的
+
+所以接下来我们就可以看一个很关键的问题了，那就是ConsumeQueue会被大量的消费者发送的请求给高并发的读取，所以ConsumeQueue文件的读操作是非常频繁的，而且同时会极大的影响到消费者进行消息拉取的性能和消费吞吐量。
+
+所以实际上broker对ConsumeQueue文件同样也是基于os cache来进行优化的
+
+也就是说，对于Broker机器的磁盘上的大量的ConsumeQueue文件，在写入的时候也都是优先进入os cache中的
+
+而且大家之前知道ConsumeQueue文件主要是存放消息的offset，所以每个文件很小，30万条消息的offset就只有5.72MB而已。所以实际上ConsumeQueue文件们是不占用多少磁盘空间的，他们整体数据量很小，几乎可以完全被os缓存在内存cache里。
+
+
+所以实际上在消费者机器拉取消息的时候，第一步大量的频繁读取ConsumeQueue文件，几乎可以说就是跟读内存里的数据的性能是一样的，通过这个就可以保证数据消费的高性能以及高吞吐
+
+# 第二个关键问题：CommitLog是基于os cache+磁盘一起读取的
+
+
+接着我们来看第二个比较关键的问题，在进行消息拉取的时候，先读os cache里的少量ConsumeQueue的数据，这个性能是极高的，然后第二步就是要根据你读取到的offset去CommitLog里读取消息的完整数据了。
+
+所以最终结论来了，当你拉取消息的时候，可以轻松从os cache里读取少量的ConsumeQueue文件里的offset，这个性能是极高的，但是当你去CommitLog文件里读取完整消息数据的时候，会有两种可能。
+
+第一种情况，如果你读取的是那种刚刚写入CommitLog的数据，那么大概率他们还停留在os cache中，此时你可以顺利的直接从os cache里读取CommitLog中的数据，这个就是内存读取，性能是很高的。
+
+第二种情况，你也许读取的是比较早之前写入CommitLog的数据，那些数据早就被刷入磁盘了，已经不在os cache里了，那么此时你就只能从磁盘上的文件里读取了，这个性能是比较差一些的。

@@ -1,0 +1,8 @@
+# DLedger主从同步原理
+
+首先，我们回顾一下，上一次已经讲到，producer写入消息到broker之后，broker会将消息写入本地CommitLog磁盘文件里去，然后还有一些ConsumeQueue会存储Topic下各个MessageQueue的消息的物理位置。
+
+而且我们给大家说过，如果要让Broker实现高可用，那么必须有一个Broker组，里面有一个是Leader Broker可以写入数据，然后让Leader Broker接收到数据之后，直接把数据同步给其他的Follower Broker
+
+这样的话，一条数据就会在三个Broker上有三份副本，此时如果Leader Broker宕机，那么就直接让其他的Follower Broker自动切换为新的Leader Broker，继续接受客户端的数据写入就可以了。
+
